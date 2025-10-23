@@ -11,7 +11,7 @@ from datetime import datetime
 # Configuration
 ROOT_DIR = "/home/sftpbackup/crm"
 EXTRACT_DIR = "/home/sftpbackup/crm_extracted"
-LOG_FILE = "/home/sftpbackup/logs/files-log.log"
+LOG_FILE = "/home/sftpbackup/logs/files_logs.log"
 STATE_FILE = "/home/sftpbackup/logs/extracted_tars.log"
 UPLOAD_STATE_FILE = "/home/sftpbackup/logs/uploaded_wavs.log"
 
