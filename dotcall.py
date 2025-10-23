@@ -99,6 +99,25 @@ def file_exists_in_s3(s3_client, bucket, key):
         logger.error(f"Failed to check S3 key {key} in bucket {bucket}: {e}")
         raise
 
+def cleanup_stale_uploads(conn):
+    """Remove FAILED entries from uploads table for non-existent .wav files."""
+    logger.info("Cleaning up stale FAILED entries from uploads table")
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT wav_path FROM uploads WHERE status = 'FAILED'")
+        failed_wavs = [row[0] for row in cursor.fetchall()]
+        deleted_count = 0
+        for wav_path in failed_wavs:
+            if not os.path.exists(wav_path):
+                cursor.execute("DELETE FROM uploads WHERE wav_path = ?", (wav_path,))
+                logger.info(f"Removed stale FAILED entry for {wav_path}")
+                deleted_count += 1
+        conn.commit()
+        logger.info(f"Cleaned up {deleted_count} stale FAILED entries")
+    except sqlite3.Error as e:
+        logger.error(f"Failed to clean up stale uploads: {e}")
+        # Continue execution despite error to avoid interrupting main script
+
 def load_uploaded_wavs(conn):
     """Load uploaded and failed .wav files from SQLite database, keeping only the latest entry per file."""
     uploaded_wavs = set()
@@ -344,6 +363,7 @@ def main():
     try:
         conn = initialize_db()
         s3_client = initialize_s3_client(BUCKET_WAV_CONFIG["endpoint"])
+        cleanup_stale_uploads(conn)  # Clean up stale FAILED entries
     except Exception as e:
         logger.error("Aborting due to initialization failure")
         conn.close() if 'conn' in locals() else None
