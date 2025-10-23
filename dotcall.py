@@ -1,3 +1,4 @@
+```python
 import os
 import tarfile
 import csv
@@ -10,6 +11,7 @@ from datetime import datetime
 import sqlite3
 import requests
 import pytz
+from tenacity import retry, stop_after_attempt, wait_fixed
 
 # Configuration
 ROOT_DIR = "/home/sftpbackup/crm"
@@ -103,20 +105,27 @@ def file_exists_in_s3(s3_client, bucket, key):
         raise
 
 def cleanup_stale_uploads(conn):
-    """Remove FAILED entries from uploads table for non-existent .wav files."""
+    """Remove FAILED entries for non-existent .wav files and reset retry_count for existing ones with max retries."""
     logger.info("Cleaning up stale FAILED entries from uploads table")
     try:
         cursor = conn.cursor()
-        cursor.execute("SELECT wav_path FROM uploads WHERE status = 'FAILED'")
-        failed_wavs = [row[0] for row in cursor.fetchall()]
+        cursor.execute("SELECT wav_path, retry_count FROM uploads WHERE status = 'FAILED'")
+        failed_wavs = cursor.fetchall()
         deleted_count = 0
-        for wav_path in failed_wavs:
+        reset_count = 0
+        for wav_path, retry_count in failed_wavs:
             if not os.path.exists(wav_path):
                 cursor.execute("DELETE FROM uploads WHERE wav_path = ?", (wav_path,))
                 logger.info(f"Removed stale FAILED entry for {wav_path}")
                 deleted_count += 1
+            elif retry_count >= MAX_RETRIES:
+                cursor.execute("""
+                    UPDATE uploads SET retry_count = 0, timestamp = ? WHERE wav_path = ?
+                """, (datetime.now().strftime('%Y-%m-%d %H:%M:%S'), wav_path))
+                logger.info(f"Reset retry_count for {wav_path}")
+                reset_count += 1
         conn.commit()
-        logger.info(f"Cleaned up {deleted_count} stale FAILED entries")
+        logger.info(f"Cleaned up {deleted_count} stale FAILED entries, reset {reset_count} max-retry entries")
     except sqlite3.Error as e:
         logger.error(f"Failed to clean up stale uploads: {e}")
 
@@ -354,6 +363,13 @@ def rename_wav_if_needed(wav_file, metadata):
         logger.error(f"Failed to rename {wav_file} to {new_filename}: {e}")
         return None
 
+@retry(stop=stop_after_attempt(3), wait=wait_fixed(2))
+def post_to_api(url, payload, headers):
+    """Send POST request to API with retries."""
+    response = requests.post(url, json=payload, headers=headers)
+    response.raise_for_status()
+    return response
+
 def upload_wav_to_s3(s3_client, wav_file, bucket_config, conn, metadata=None):
     """Upload a .wav file to S3 and notify API."""
     logger.info(f"Attempting to upload {wav_file} to s3://{bucket_config['name']}")
@@ -381,11 +397,11 @@ def upload_wav_to_s3(s3_client, wav_file, bucket_config, conn, metadata=None):
                 }
                 headers = {"Authorization": f"Bearer {BEARER_TOKEN}"}
                 try:
-                    response = requests.post(API_URL, json=payload, headers=headers)
-                    response.raise_for_status()
+                    response = post_to_api(API_URL, payload, headers)
                     logger.info(f"Successfully notified API for {wav_file}: {response.status_code}")
+                    logger.debug(f"API response for {wav_file}: {response.text}")
                 except requests.RequestException as e:
-                    logger.error(f"Failed to notify API for {wav_file}: {e}")
+                    logger.error(f"Failed to notify API for {wav_file} after retries: {e}, response: {getattr(e.response, 'text', 'No response')}")
             else:
                 logger.warning(f"No metadata for {filename}, skipping API notification")
             return True
@@ -407,11 +423,11 @@ def upload_wav_to_s3(s3_client, wav_file, bucket_config, conn, metadata=None):
             }
             headers = {"Authorization": f"Bearer {BEARER_TOKEN}"}
             try:
-                response = requests.post(API_URL, json=payload, headers=headers)
-                response.raise_for_status()
+                response = post_to_api(API_URL, payload, headers)
                 logger.info(f"Successfully notified API for existing {wav_file}: {response.status_code}")
+                logger.debug(f"API response for {wav_file}: {response.text}")
             except requests.RequestException as e:
-                logger.error(f"Failed to notify API for existing {wav_file}: {e}")
+                logger.error(f"Failed to notify API for existing {wav_file} after retries: {e}, response: {getattr(e.response, 'text', 'No response')}")
         return True
 
 def main():
@@ -495,3 +511,4 @@ if __name__ == "__main__":
         logger.info("Process completed successfully")
     except Exception as e:
         logger.error(f"Process failed: {e}")
+```
